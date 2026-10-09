@@ -11,9 +11,10 @@ const scene = new Konva.Layer(), overlay = new Konva.Layer();
 stage.add(scene, overlay);
 let mask = canvas();
 const maskNode = new Konva.Image({ image: mask, opacity: .48, listening: false });
+const boxOutline = new Konva.Rect({ stroke: '#ffb2cc', strokeWidth: 1, dash: [6, 4], listening: false, visible: false });
 const onionNode = new Konva.Image({ opacity: .2, listening: false });
 const transformer = new Konva.Transformer({ borderStroke: '#9cedb4', anchorStroke: '#9cedb4', anchorFill: '#222327', anchorSize: 8, rotateAnchorOffset: 24, flipEnabled: false, boundBoxFunc: (old, next) => Math.abs(next.width) < 4 || Math.abs(next.height) < 4 ? old : next });
-overlay.add(maskNode, transformer);
+overlay.add(maskNode, boxOutline, transformer);
 scene.add(onionNode);
 const status = message => { $('status').textContent = message; $('status').title = message; };
 function serializeLayers() { return layers.map(l => ({ id: l.id, name: l.name, visible: l.node.visible(), opacity: l.node.opacity(), x: l.node.x(), y: l.node.y(), scaleX: l.node.scaleX(), scaleY: l.node.scaleY(), rotation: l.node.rotation(), data: l.canvas.toDataURL() })); }
@@ -81,23 +82,60 @@ async function switchFrame(index) { syncFrame(); setBusy(true); try { await load
 function resizeCanvas() { mask = canvas(); maskNode.image(mask); hasMask = false; $('dimensions').textContent = `${width} x ${height}`; fit(); }
 function zoom(next) { scale = Math.max(.1, Math.min(2, next)); stage.size({ width: width * scale, height: height * scale }); stage.scale({ x: scale, y: scale }); $('artboard').style.width = `${width * scale}px`; $('artboard').style.height = `${height * scale}px`; $('zoom-value').textContent = `${Math.round(scale * 100)}%`; stage.draw(); }
 function fit() { const v = $('viewport'); zoom(Math.min((v.clientWidth - 70) / width, (v.clientHeight - 70) / height, 1)); }
-function clearMask() { mask.getContext('2d').clearRect(0, 0, width, height); hasMask = false; $('selection-state').textContent = 'None'; overlay.batchDraw(); }
-function setTool(next) { tool = next; document.querySelectorAll('[data-tool]').forEach(b => { b.classList.toggle('active', b.dataset.tool === tool); b.setAttribute('aria-pressed', String(b.dataset.tool === tool)); }); layers.forEach(l => l.node.draggable(tool === 'move')); stage.container().style.cursor = tool === 'move' ? 'default' : 'crosshair'; select(selected); }
-function point() { const p = stage.getPointerPosition(); return { x: p.x / scale, y: p.y / scale }; }
+function clearMask() { mask.getContext('2d').clearRect(0, 0, width, height); boxOutline.hide(); hasMask = false; $('selection-state').textContent = 'None'; overlay.batchDraw(); }
+function setTool(next) { finishStroke(); tool = next; document.querySelectorAll('[data-tool]').forEach(b => { b.classList.toggle('active', b.dataset.tool === tool); b.setAttribute('aria-pressed', String(b.dataset.tool === tool)); }); layers.forEach(l => l.node.draggable(tool === 'move')); stage.container().style.cursor = tool === 'move' ? 'default' : 'crosshair'; select(selected); }
+function point(event) { const rect = stage.content.getBoundingClientRect(); return { x: (event.clientX - rect.left) * width / rect.width, y: (event.clientY - rect.top) * height / rect.height }; }
 function stroke(from, to) {
-  const target = drawing.target, ctx = target.getContext('2d'); ctx.save(); ctx.globalCompositeOperation = tool === 'erase' ? 'destination-out' : 'source-over'; ctx.strokeStyle = tool === 'select' ? '#ff749c' : $('color').value; ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = Number($('brush-size').value); ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke(); ctx.beginPath(); ctx.arc(to.x, to.y, ctx.lineWidth / 2, 0, Math.PI * 2); ctx.fill(); ctx.restore();
-  if (tool === 'select') { hasMask = true; $('selection-state').textContent = 'Painted selection'; overlay.batchDraw(); } else scene.batchDraw();
+  const { target, mode, color, size } = drawing, ctx = target.getContext('2d'); ctx.save(); ctx.globalCompositeOperation = mode === 'erase' ? 'destination-out' : 'source-over'; ctx.strokeStyle = mode === 'select' ? '#ff749c' : color; ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = size; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke(); ctx.beginPath(); ctx.arc(to.x, to.y, ctx.lineWidth / 2, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  if (mode === 'select') { hasMask = true; $('selection-state').textContent = 'Painted selection'; overlay.batchDraw(); } else scene.batchDraw();
 }
-stage.on('pointerdown', event => {
-  if (busy || playing || tool === 'move' || event.evt.button > 0) return;
-  event.evt.preventDefault(); const p = point();
-  if (tool !== 'select') { if (!active()?.node.visible()) return status('Select a visible layer first.'); remember(); replaceBuffer(active(), rasterize(active())); }
-  drawing = { target: tool === 'select' ? mask : active().canvas, last: p }; stage.container().setPointerCapture?.(event.evt.pointerId); stroke(p, p);
+function drawBox(to) {
+  const clamp = p => ({ x: Math.max(0, Math.min(width, p.x)), y: Math.max(0, Math.min(height, p.y)) });
+  const from = clamp(drawing.start), end = clamp(to);
+  const x = Math.floor(Math.min(from.x, end.x)), y = Math.floor(Math.min(from.y, end.y));
+  const w = Math.ceil(Math.max(from.x, end.x)) - x, h = Math.ceil(Math.max(from.y, end.y)) - y;
+  const ctx = mask.getContext('2d'); ctx.clearRect(0, 0, width, height);
+  if (drawing.base) ctx.drawImage(drawing.base, 0, 0);
+  ctx.fillStyle = '#ff749c'; if (from.x !== end.x && from.y !== end.y) ctx.fillRect(x, y, w, h);
+  const nonempty = from.x !== end.x && from.y !== end.y;
+  hasMask = nonempty || drawing.hadMask;
+  boxOutline.setAttrs({ x, y, width: w, height: h, visible: nonempty, strokeWidth: 1 / scale, dash: [6 / scale, 4 / scale] });
+  $('selection-state').textContent = nonempty ? `${w} x ${h} selected` : hasMask ? 'Selection' : 'None';
+  overlay.batchDraw();
+}
+// Capture and listen on the same DOM surface; capturing the parent bypasses Konva's movement listeners.
+const drawingSurface = stage.content;
+drawingSurface.addEventListener('pointerdown', event => {
+  if (busy || playing || drawing || tool === 'move' || event.button !== 0 || event.isPrimary === false) return;
+  event.preventDefault(); const p = point(event), selecting = tool === 'select' || tool === 'box';
+  if (!selecting) { if (!active()?.node.visible()) return status('Select a visible layer first.'); remember(); replaceBuffer(active(), rasterize(active())); }
+  const base = tool === 'box' && event.shiftKey ? canvas() : null;
+  if (base) base.getContext('2d').drawImage(mask, 0, 0);
+  boxOutline.hide();
+  drawing = { mode: tool, target: selecting ? mask : active().canvas, start: p, last: p, pointerId: event.pointerId, base, hadMask: Boolean(base && hasMask), color: $('color').value, size: Number($('brush-size').value) };
+  drawingSurface.setPointerCapture(event.pointerId);
+  if (tool === 'box') drawBox(p); else stroke(p, p);
 });
-stage.on('pointermove', () => { if (!drawing) return; const p = point(); stroke(drawing.last, p); drawing.last = p; });
-function finishStroke() { if (!drawing) return; drawing = null; if (tool !== 'select') { renderLayers(); renderFrames(); } }
-window.addEventListener('pointerup', finishStroke); window.addEventListener('pointercancel', finishStroke);
-function requireSelection() { if (!active()?.node.visible()) throw new Error('Select a visible layer first.'); if (!hasMask) throw new Error('Paint the part to edit with the selection tool first.'); }
+function continueStroke(event) {
+  if (!drawing || event.pointerId !== drawing.pointerId) return;
+  event.preventDefault();
+  const p = point(event);
+  if (drawing.mode === 'box') drawBox(p); else stroke(drawing.last, p);
+  drawing.last = p;
+}
+function finishStroke(event) {
+  if (!drawing || (event?.pointerId !== undefined && event.pointerId !== drawing.pointerId)) return;
+  if (event?.type === 'pointerup') continueStroke(event);
+  const completed = drawing; drawing = null;
+  if (drawingSurface.hasPointerCapture(completed.pointerId)) drawingSurface.releasePointerCapture(completed.pointerId);
+  if (!['select', 'box'].includes(completed.mode)) { renderLayers(); renderFrames(); }
+}
+drawingSurface.addEventListener('pointermove', continueStroke);
+drawingSurface.addEventListener('pointerup', finishStroke);
+drawingSurface.addEventListener('pointercancel', finishStroke);
+drawingSurface.addEventListener('lostpointercapture', finishStroke);
+window.addEventListener('blur', () => finishStroke());
+function requireSelection() { if (!active()?.node.visible()) throw new Error('Select a visible layer first.'); if (!hasMask) throw new Error('Select the part to edit with the painted or box selection tool first.'); }
 function applyMask(source, operation = 'destination-in') { const ctx = source.getContext('2d'); ctx.save(); ctx.globalCompositeOperation = operation; ctx.drawImage(mask, 0, 0); ctx.restore(); return source; }
 function cropContent(buffer) { const ctx = buffer.getContext('2d'), data = ctx.getImageData(0, 0, width, height).data; let x0 = width, y0 = height, x1 = -1, y1 = -1; for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) if (data[(y * width + x) * 4 + 3]) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); } if (x1 < 0) throw new Error('The selection contains no pixels on this layer.'); const result = canvas(x1 - x0 + 1, y1 - y0 + 1); result.getContext('2d').drawImage(buffer, x0, y0, result.width, result.height, 0, 0, result.width, result.height); return { buffer: result, x: x0, y: y0 }; }
 async function importImage(src, name) { const img = await loadImage(src); if (img.width * img.height > 16000000) throw new Error('Please import an image under 16 megapixels.'); remember(); const buffer = canvas(); const factor = Math.min(width / img.width, height / img.height); buffer.getContext('2d').drawImage(img, (width - img.width * factor) / 2, (height - img.height * factor) / 2, img.width * factor, img.height * factor); addLayer(buffer, name); setTool('move'); renderLayers(); await renderFrames(); status(`Added ${name}`); }

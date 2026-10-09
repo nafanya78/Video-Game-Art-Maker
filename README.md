@@ -16,6 +16,7 @@ Alternatively copy `.env.example` to `.env`, set `GEMINI_API_KEY` (or `GOOGLE_AP
 
 - Import PNG, JPEG, or WebP images, or generate a new transparent asset layer.
 - Paint over wheels, bodywork, or another part with the selection tool. Recolor uses the brush color and preserves simple brightness shading. Remove part deletes selected pixels. AI edit replaces selected pixels from a prompt and preserves every fully unselected pixel exactly.
+- Brush, erase, and painted selection support continuous click-and-drag strokes, including drags that leave and re-enter the canvas. Box select creates a rectangular selection in either drag direction; hold Shift to add another box. The selection works with extract, remove, recolor, and AI edits. Each brush or erase drag is one undo step.
 - Extract moves selected pixels from the current layer into a separate, tightly cropped layer. Move, resize, and rotate it with the transform handles. Transparency is left where the part was removed; repaint or use AI editing to fill exposed areas when needed.
 - Brush, erase, opacity, visibility, naming, ordering, duplication, and undo/redo operate on layers. AI edits preserve the original as a hidden layer.
 - Generated images arrive flattened. Part selection is manual; there is no automatic semantic wheel/body segmentation in this version.
