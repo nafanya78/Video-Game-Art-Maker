@@ -1,0 +1,9 @@
+{
+  "name": "video-game-art-maker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node --env-file-if-exists=.env server.mjs", "test": "node --test tests/*.test.mjs" },
+  "dependencies": { "konva": "^10.0.0", "lucide": "^0.468.0" },
+  "devDependencies": { "@playwright/test": "^1.56.0" }
+}
