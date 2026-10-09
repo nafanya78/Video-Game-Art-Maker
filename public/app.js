@@ -3,7 +3,9 @@ const icons = () => lucide.createIcons();
 const canvas = (w = width, h = height) => Object.assign(document.createElement('canvas'), { width: w, height: h });
 const loadImage = src => new Promise((resolve, reject) => { const image = new Image(); image.onload = () => resolve(image); image.onerror = () => reject(new Error('Could not read image.')); image.src = src; });
 let width = 1024, height = 1024, scale = .5, tool = 'move', selected = null, layers = [], frames = [[]], frameIndex = 0;
-let history = [], future = [], busy = false, playing = false, playTimer, key = '', configured = false, drawing = null, hasMask = false;
+let history = [], future = [], busy = false, playing = false, playTimer, drawing = null, hasMask = false;
+let provider = 'openai', googleModel = '', openaiTransparent = true;
+const keys = { openai: '', google: '' }, configured = { openai: false, google: false };
 const stage = new Konva.Stage({ container: 'stage', width: 512, height: 512 });
 const scene = new Konva.Layer(), overlay = new Konva.Layer();
 stage.add(scene, overlay);
@@ -107,15 +109,23 @@ function validateProject(data) {
   for (const frame of data.frames) { if (!Array.isArray(frame) || frame.length > 40) throw new Error('Invalid layers.'); for (const l of frame) { if (typeof l.name !== 'string' || typeof l.id !== 'string' || typeof l.visible !== 'boolean' || !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(l.data || '') || ['x','y','scaleX','scaleY','rotation','opacity'].some(k => !Number.isFinite(l[k])) || l.opacity < 0 || l.opacity > 1) throw new Error('Invalid layer data.'); } }
 }
 async function aiRequest(edit) {
-  if (!configured && !key) { $('settings-dialog').showModal(); return; }
+  if (!configured[provider] && !keys[provider]) { openConnection(); return; }
   if (edit) requireSelection();
   const prompt = (edit ? $('edit-prompt') : $('prompt')).value.trim(); if (!prompt) throw new Error('Enter a prompt first.');
   const request = { prompt: edit ? `Edit only the masked region of this game asset. ${prompt}. Preserve the view, lighting, and all unmasked details.` : `${prompt}\nGame asset: ${$('asset-type').value}. Style: ${$('style').value}. No watermark.`, size: `${width}x${height}`, quality: $('quality').value, transparent: $('transparent').checked };
+  request.provider = provider;
+  if (provider === 'google' && googleModel) request.model = googleModel;
   let original, target, selection;
   if (edit) { target = active(); original = rasterize(target); selection = canvas(); selection.getContext('2d').drawImage(mask, 0, 0); const inverse = canvas(); const ctx = inverse.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0,0,width,height); ctx.globalCompositeOperation = 'destination-out'; ctx.drawImage(mask,0,0); request.image = original.toDataURL(); request.mask = inverse.toDataURL(); }
+  if (edit && provider === 'google') {
+    const guide = canvas(), ctx = guide.getContext('2d');
+    ctx.drawImage(selection, 0, 0); ctx.globalCompositeOperation = 'source-in'; ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, width, height);
+    ctx.globalCompositeOperation = 'destination-over'; ctx.fillStyle = '#000'; ctx.fillRect(0, 0, width, height);
+    request.selection = guide.toDataURL();
+  }
   setBusy(true, edit ? 'AI is editing your selection...' : 'Generating asset...');
   try {
-    const response = await fetch('/api/image', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(key ? { 'X-OpenAI-Key': key } : {}) }, body: JSON.stringify(request) }); const result = await response.json(); if (!response.ok) throw new Error(result.error);
+    const response = await fetch('/api/image', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(keys[provider] ? { [provider === 'google' ? 'X-Google-Key' : 'X-OpenAI-Key']: keys[provider] } : {}) }, body: JSON.stringify(request) }); const result = await response.json(); if (!response.ok) throw new Error(result.error);
     const img = await loadImage(result.image); const buffer = canvas(); buffer.getContext('2d').drawImage(img,0,0,width,height); remember();
     if (edit) {
       // Composite pixel-by-pixel so all unselected pixels remain byte-for-byte unchanged.
@@ -156,9 +166,32 @@ handle('open-project',()=>$('project-file').click());
 $('project-file').onchange=()=>guarded(async()=>{const file=$('project-file').files[0];if(!file)return;if(file.size>100*1024*1024)throw new Error('Project exceeds 100 MB.');const data=JSON.parse(await file.text());validateProject(data);const images=await Promise.all(data.frames.flat().map(l=>loadImage(l.data)));if(images.some(i=>i.width*i.height>16000000))throw new Error('Project image is too large.');remember();setBusy(true);try{await restore(data);status('Project opened.');}finally{setBusy(false);$('project-file').value='';}});
 handle('new-project',async()=>{if(layers.length&&!confirm('Start a new project? Save your current project first to keep a file copy.'))return;remember();await restore({width:1024,height:1024,frames:[[]],frameIndex:0,name:'Untitled asset',fps:8});status('New project');});
 $('size').onchange=()=>guarded(()=>{const [w,h]=$('size').value.split('x').map(Number);if(layers.length||frames.length>1){$('size').value=`${width}x${height}`;status('Start a new project to choose a different canvas size.');return;}remember();width=w;height=h;resizeCanvas();renderFrames();});
-handle('settings',()=>$('settings-dialog').showModal());
-$('connect').onclick=()=>{key=$('api-key').value.trim();$('api-key').value='';updateConnection();};
-function updateConnection(){$('connection').textContent=configured?'AI connected on server':key?'AI connected for this session':'AI disconnected';$('connection').classList.toggle('connected',configured||Boolean(key));}
+function connectionFields() {
+  const google = $('provider').value === 'google';
+  $('api-key').value = '';
+  $('key-label').textContent = google ? 'Google AI Studio API key' : 'OpenAI API key';
+  $('api-key').placeholder = google ? 'AIza...' : 'sk-...';
+  $('google-model-label').hidden = !google; $('google-key-link').hidden = !google;
+  $('key-note').textContent = `Keys are kept in memory for this tab only. Provider usage charges may apply.${keys[$('provider').value] || configured[$('provider').value] ? ' A key is already configured; leave blank to keep it.' : ''}`;
+}
+function openConnection() { $('provider').value = provider; $('google-model').value = googleModel; connectionFields(); $('settings-dialog').showModal(); }
+handle('settings', openConnection);
+$('provider').onchange = connectionFields;
+$('connection-form').onsubmit = event => {
+  if (event.submitter?.value !== 'connect') return;
+  const next = $('provider').value;
+  if (provider === 'openai') openaiTransparent = $('transparent').checked;
+  if ($('api-key').value.trim()) keys[next] = $('api-key').value.trim();
+  provider = next; googleModel = $('google-model').value; $('api-key').value = ''; updateConnection();
+};
+$('settings-dialog').addEventListener('close', () => { $('api-key').value = ''; });
+function updateConnection() {
+  const name = provider === 'google' ? 'Google AI Studio' : 'OpenAI';
+  $('connection').textContent = `${name}: ${keys[provider] ? 'session key set' : configured[provider] ? 'server key set' : 'no API key'}`;
+  $('connection').classList.toggle('connected', configured[provider] || Boolean(keys[provider]));
+  $('transparent').disabled = provider === 'google'; $('transparent').checked = provider === 'google' ? false : openaiTransparent;
+  $('quality').disabled = provider === 'google'; $('provider-note').hidden = provider !== 'google';
+}
 handle('duplicate-frame',async()=>{if(frames.length>=48)throw new Error('This project supports up to 48 frames.');remember();syncFrame();frames.splice(frameIndex+1,0,structuredClone(frames[frameIndex]));await switchFrame(frameIndex+1);status('Frame duplicated.');});
 handle('delete-frame',async()=>{if(frames.length<2)return;remember();frames.splice(frameIndex,1);frameIndex=Math.min(frameIndex,frames.length-1);await loadLayers(frames[frameIndex]);clearMask();await renderFrames();});
 $('onion').onchange=()=>{onionNode.visible($('onion').checked&&frameIndex>0&&!playing);scene.batchDraw();};
@@ -171,4 +204,4 @@ $('download-export').onclick=()=>guarded(async()=>{const factor=Number($('export
 window.addEventListener('keydown',e=>{if(/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)||document.querySelector('dialog[open]'))return;if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();$(e.shiftKey?'redo':'undo').click();}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();$('save-project').click();}if(e.key==='Escape'){if(playing)stopPlayback();else clearMask();}});
 new ResizeObserver(()=>{if(!drawing)fit();}).observe($('viewport'));
 icons();fit();renderLayers();await renderFrames();updateUndo();
-try{const info=await fetch('/api/status').then(r=>r.json());configured=info.configured;updateConnection();}catch{status('Local server unavailable.');}
+try{const info=await fetch('/api/status').then(r=>r.json());configured.openai=Boolean(info.providers?.openai?.configured ?? info.configured);configured.google=Boolean(info.providers?.google?.configured);if(configured.google&&!configured.openai)provider='google';updateConnection();}catch{status('Local server unavailable.');}

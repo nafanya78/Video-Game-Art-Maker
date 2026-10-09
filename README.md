@@ -6,7 +6,11 @@ A local game-asset editor for AI Race Game, with AI image generation, targeted p
 
 Install Node.js 22 or newer, then run `npm install` and `npm start`. Open the local URL printed by the server (normally http://127.0.0.1:4317). The server uses the next available port if necessary.
 
-Editing and the included sample work without an API key. For paid AI generation and masked edits, enter an OpenAI API key in the connection dialog; the key lives only in the current tab's memory. Alternatively copy `.env.example` to `.env`, set `OPENAI_API_KEY`, and restart. `.env` is ignored by Git and never served. The default image model is `gpt-image-1.5`; change `OPENAI_IMAGE_MODEL` in `.env` to a compatible GPT Image model available to your account. API access and billing are separate from using this local editor.
+Editing and the included sample work without an API key. In AI Connection, choose **Google AI Studio** or **OpenAI** and enter that provider's API key. Keys live only in the current tab's memory and are never included in project files. A session key takes precedence over that provider's server key. A configured key is not verified until an image request succeeds.
+
+For Google, create a key at https://aistudio.google.com/apikey. Select a Gemini image model in AI Connection; the server default is `gemini-3.1-flash-image`. Google supports generation and selected-part editing. It does not generate transparent backgrounds, so that option is disabled when Google is selected. Use the manual selection/erase tools to remove a background afterward. Google's quality is determined by the model, so the OpenAI quality selector is disabled. Output is resized to the project canvas dimensions. For edits, the source image and a white-on-black selection guide are sent to Gemini; the editor composites the result into the selection and preserves every fully unselected pixel. Gemini does not receive a native inpainting mask.
+
+Alternatively copy `.env.example` to `.env`, set `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) and/or `OPENAI_API_KEY`, and restart. `GOOGLE_IMAGE_MODEL` controls Google's server default; `OPENAI_IMAGE_MODEL` controls OpenAI's default (`gpt-image-1.5`). `.env` is ignored by Git and never served. API access, model availability, quotas, and billing are managed by the selected provider.
 
 ## Parts and layers
 
@@ -28,7 +32,7 @@ Export the current frame as a transparent PNG, or an animation as a PNG sprite s
 
 `npm test` runs server contract tests using a mocked provider. `npx playwright test` runs editor tests in Microsoft Edge against the running local server on port 4317, including pixel preservation outside AI selections, extraction, undo, project round-trip, sprite export, and mobile layout. No paid API requests are made by tests.
 
-Live generation requires an API key and has not been validated without one. API implementation follows the [OpenAI image generation reference](https://developers.openai.com/api/reference/resources/images/methods/generate) and [image edit reference](https://developers.openai.com/api/reference/resources/images/methods/edit). Canvas transforms use [Konva](https://konvajs.org/docs/).
+Live generation requires a provider API key and has not been validated without one. API implementation follows the [Google image generation guide](https://ai.google.dev/gemini-api/docs/generate-content/image-generation), [Google generateContent reference](https://ai.google.dev/api/generate-content), [OpenAI image generation reference](https://developers.openai.com/api/reference/resources/images/methods/generate), and [OpenAI image edit reference](https://developers.openai.com/api/reference/resources/images/methods/edit). Canvas transforms use [Konva](https://konvajs.org/docs/).
 
 ## Sample asset
 

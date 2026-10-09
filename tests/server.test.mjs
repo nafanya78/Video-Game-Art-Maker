@@ -41,3 +41,60 @@ test('masked editing sends multipart image and mask, and surfaces provider error
     assert.equal((await response.json()).error, 'Quota reached');
   });
 });
+
+test('Google uses only its own key and reports provider configuration without secrets', async () => {
+  await running({ apiKey: 'openai-secret', googleApiKey: '', fetchImpl: () => { throw new Error('Unexpected call'); } }, async url => {
+    const status = await (await fetch(`${url}/api/status`)).json();
+    assert.equal(status.providers.openai.configured, true);
+    assert.equal(status.providers.google.configured, false);
+    assert.ok(!JSON.stringify(status).includes('openai-secret'));
+    const response = await fetch(`${url}/api/image`, { method: 'POST', headers: { 'X-OpenAI-Key': 'wrong-provider-key' }, body: JSON.stringify({ ...body, provider: 'google', transparent: false }) });
+    assert.equal(response.status, 401);
+  });
+});
+test('Google generates images and skips thought images in the response', async () => {
+  await running({ apiKey: 'unused-openai', googleApiKey: 'server-google', fetchImpl: async (url, options) => {
+    assert.match(url, /^https:\/\/generativelanguage.googleapis.com\/v1beta\/models\/gemini-3.1-flash-image:generateContent$/);
+    assert.equal(options.headers['x-goog-api-key'], 'session-google');
+    assert.equal(options.headers.Authorization, undefined);
+    const payload = JSON.parse(options.body);
+    assert.equal(payload.generationConfig.imageConfig.aspectRatio, '3:2');
+    assert.deepEqual(payload.generationConfig.responseModalities, ['TEXT', 'IMAGE']);
+    return Response.json({ candidates: [{ content: { parts: [
+      { thought: true, inlineData: { mimeType: 'image/png', data: 'dGhvdWdodA==' } },
+      { inlineData: { mimeType: 'image/jpeg', data: 'dGVzdA==' } }
+    ] } }] });
+  } }, async url => {
+    const response = await fetch(`${url}/api/image`, { method: 'POST', headers: { 'X-Google-Key': 'session-google' }, body: JSON.stringify({ ...body, provider: 'google', model: 'gemini-3.1-flash-image', size: '1536x1024', transparent: false }) });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).image, 'data:image/jpeg;base64,dGVzdA==');
+  });
+});
+test('Google edits send the source and selection guide and preserve quota errors', async () => {
+  await running({ googleApiKey: 'test-google', fetchImpl: async (url, options) => {
+    const payload = JSON.parse(options.body), parts = payload.contents[0].parts;
+    assert.match(parts[0].text, /white means edit, black means preserve/);
+    assert.equal(parts[1].inlineData.data, 'c291cmNl');
+    assert.equal(parts[2].inlineData.data, 'c2VsZWN0aW9u');
+    return Response.json({ error: { message: 'Google quota exceeded' } }, { status: 429 });
+  } }, async url => {
+    const response = await fetch(`${url}/api/image`, { method: 'POST', body: JSON.stringify({ ...body, provider: 'google', transparent: false, image: 'data:image/png;base64,c291cmNl', mask: 'data:image/png;base64,bWFzaw==', selection: 'data:image/png;base64,c2VsZWN0aW9u' }) });
+    assert.equal(response.status, 429);
+    assert.equal((await response.json()).error, 'Google quota exceeded');
+  });
+});
+test('Google missing image output is an actionable error', async () => {
+  await running({ googleApiKey: 'test-google', fetchImpl: async () => Response.json({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'Please specify the desired object.' }] } }] }) }, async url => {
+    const response = await fetch(`${url}/api/image`, { method: 'POST', body: JSON.stringify({ ...body, provider: 'google', transparent: false }) });
+    assert.equal(response.status, 502);
+    assert.match((await response.json()).error, /Please specify the desired object/);
+  });
+});
+test('invalid provider, model, unsupported transparency, and missing guide fail before billing', async () => {
+  await running({ googleApiKey: 'test-google', fetchImpl: () => { throw new Error('Unexpected call'); } }, async url => {
+    for (const overrides of [{ provider: 'other' }, { provider: 'google', model: '../invalid' }, { provider: 'google', transparent: true }, { provider: 'google', transparent: false, image: 'data:image/png;base64,c291cmNl', mask: 'data:image/png;base64,bWFzaw==' }]) {
+      const response = await fetch(`${url}/api/image`, { method: 'POST', body: JSON.stringify({ ...body, ...overrides }) });
+      assert.equal(response.status, 400);
+    }
+  });
+});

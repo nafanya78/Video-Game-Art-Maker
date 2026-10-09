@@ -52,8 +52,8 @@ test('parts, undo, frames, project round-trip, and exports', async ({ page }) =>
   await page.screenshot({path:'test-results/editor-desktop.png',fullPage:true});
   expect(errors).toEqual([]);
 });
-test('AI edits preserve every pixel outside the selection', async ({ page }) => {
-  await page.route('**/api/status',route=>route.fulfill({json:{configured:true}}));
+for (const provider of ['openai', 'google']) test(`${provider} AI edits preserve every pixel outside the selection`, async ({ page }) => {
+  await page.route('**/api/status',route=>route.fulfill({json:{providers:{openai:{configured:provider==='openai'},google:{configured:provider==='google'}}}}));
   await page.goto('/'); await page.getByRole('button',{name:'Open sample car'}).click();
   await expect(page.locator('.layer')).toHaveCount(1);
   const before=await save(page); let sent;
@@ -63,6 +63,8 @@ test('AI edits preserve every pixel outside the selection', async ({ page }) => 
   await page.getByRole('button',{name:'Apply AI edit'}).click();
   await expect(page.locator('.layer')).toHaveCount(2);
   const after=await save(page);
+  expect(sent.provider).toBe(provider);
+  if (provider === 'google') { expect(sent.selection).toMatch(/^data:image\/png;base64,/); expect(sent.transparent).toBe(false); }
   expect(after.frames[0][0].visible).toBe(false);
   const {changed,outsideChanged}=await page.evaluate(async sources=>{
     const pixels=await Promise.all(sources.map(async src=>{const image=new Image();image.src=src;await image.decode();const c=document.createElement('canvas');c.width=image.width;c.height=image.height;const x=c.getContext('2d');x.drawImage(image,0,0);return x.getImageData(0,0,c.width,c.height).data;}));
@@ -71,6 +73,35 @@ test('AI edits preserve every pixel outside the selection', async ({ page }) => 
     return {changed,outsideChanged};
   },[before.frames[0][0].data,after.frames[0][1].data,sent.mask]);
   expect(changed).toBeGreaterThan(0);expect(outsideChanged).toBe(0);
+});
+test('Google connection routes the session key, restores OpenAI settings, and keeps keys out of saved projects', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button',{name:'AI connection',exact:true}).click();
+  await page.locator('#api-key').fill('openai-unsaved-key');
+  await page.locator('#provider').selectOption('google');
+  await expect(page.locator('#api-key')).toHaveValue('');
+  await page.locator('#api-key').fill('google-test-key');
+  await page.locator('#google-model').selectOption('gemini-2.5-flash-image');
+  await page.getByRole('button',{name:'Apply connection'}).click();
+  await expect(page.locator('#connection')).toHaveText('Google AI Studio: session key set');
+  await expect(page.locator('#transparent')).toBeDisabled();
+  await expect(page.locator('#transparent')).not.toBeChecked();
+  await expect(page.locator('#quality')).toBeDisabled();
+  let request;
+  await page.route('**/api/image',async route=>{request=route.request();await route.fulfill({status:429,json:{error:'Google quota exceeded'}});});
+  await page.getByRole('button',{name:'Generate layer'}).click();
+  await expect(page.locator('#status')).toHaveText('Google quota exceeded');
+  expect(request.headers()['x-google-key']).toBe('google-test-key');
+  expect(request.headers()['x-openai-key']).toBeUndefined();
+  expect(request.postDataJSON().model).toBe('gemini-2.5-flash-image');
+  expect(JSON.stringify(await save(page))).not.toContain('google-test-key');
+  expect(await page.evaluate(()=>JSON.stringify([localStorage,sessionStorage]))).not.toContain('google-test-key');
+  await page.getByRole('button',{name:'AI connection',exact:true}).click();
+  await page.screenshot({path:'test-results/google-connection.png',fullPage:true});
+  await page.locator('#provider').selectOption('openai');
+  await page.getByRole('button',{name:'Apply connection'}).click();
+  await expect(page.locator('#transparent')).toBeEnabled();await expect(page.locator('#transparent')).toBeChecked();
+  await expect(page.locator('#connection')).toHaveText('OpenAI: no API key');
 });
 test('mobile editor has no horizontal overflow',async({page})=>{
   await page.setViewportSize({width:390,height:844});await page.goto('/');await page.getByRole('button',{name:'Open sample car'}).click();await expect(page.locator('.layer')).toHaveCount(1);
