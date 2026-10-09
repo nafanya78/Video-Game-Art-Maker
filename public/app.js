@@ -5,6 +5,7 @@ const loadImage = src => new Promise((resolve, reject) => { const image = new Im
 let width = 1024, height = 1024, scale = .5, tool = 'move', selected = null, layers = [], frames = [[]], frameIndex = 0;
 let history = [], future = [], busy = false, playing = false, playTimer, drawing = null, hasMask = false;
 let provider = 'openai', googleModel = '', openaiTransparent = true;
+let fitMode = true, spacePan = false, panning = null;
 const keys = { openai: '', google: '' }, configured = { openai: false, google: false };
 const stage = new Konva.Stage({ container: 'stage', width: 512, height: 512 });
 const scene = new Konva.Layer(), overlay = new Konva.Layer();
@@ -37,7 +38,12 @@ function addLayer(buffer, name = 'Paint layer', attrs = {}) {
   node.on('dragend transformend', () => { renderLayers(); renderFrames(); });
   selected = id; return layer;
 }
-function select(id) { selected = id; transformer.nodes(tool === 'move' && active()?.node.visible() ? [active().node] : []); renderLayers(); }
+function updateTransformer() {
+  const node = tool === 'move' && !playing && active()?.node.visible() ? active().node : null;
+  const current = transformer.nodes();
+  if (current.length !== (node ? 1 : 0) || node && current[0] !== node) transformer.nodes(node ? [node] : []);
+}
+function select(id) { selected = id; renderLayers(); }
 function renderLayers() {
   $('layers').replaceChildren();
   for (const l of [...layers].reverse()) {
@@ -53,7 +59,7 @@ function renderLayers() {
   const l = active(); $('layer-properties').hidden = !l;
   if (l) { $('layer-name').value = l.name; $('opacity').value = Math.round(l.node.opacity() * 100); $('opacity-value').textContent = `${$('opacity').value}%`; }
   $('empty').hidden = layers.length > 0;
-  transformer.nodes(tool === 'move' && !playing && l?.node.visible() ? [l.node] : []);
+  updateTransformer();
   $('layer-up').disabled = !l || layers.indexOf(l) === layers.length - 1; $('layer-down').disabled = !l || layers.indexOf(l) === 0;
   icons(); scene.batchDraw(); overlay.batchDraw();
 }
@@ -79,11 +85,44 @@ async function loadLayers(data) {
   data.forEach((l, i) => addLayer(buffers[i], l.name, l)); selected = layers.at(-1)?.id || null; renderLayers();
 }
 async function switchFrame(index) { syncFrame(); setBusy(true); try { await loadLayers(frames[index]); frameIndex = index; clearMask(); await renderFrames(); } finally { setBusy(false); } }
-function resizeCanvas() { mask = canvas(); maskNode.image(mask); hasMask = false; $('dimensions').textContent = `${width} x ${height}`; fit(); }
-function zoom(next) { scale = Math.max(.1, Math.min(2, next)); stage.size({ width: width * scale, height: height * scale }); stage.scale({ x: scale, y: scale }); $('artboard').style.width = `${width * scale}px`; $('artboard').style.height = `${height * scale}px`; $('zoom-value').textContent = `${Math.round(scale * 100)}%`; stage.draw(); }
-function fit() { const v = $('viewport'); zoom(Math.min((v.clientWidth - 70) / width, (v.clientHeight - 70) / height, 1)); }
+function resizeCanvas() { mask = canvas(); maskNode.image(mask); hasMask = false; $('dimensions').textContent = `${width} x ${height}`; if (fitMode) fit(); else zoom(scale); }
+function zoom(next, anchor, fitting = false) {
+  if (drawing || panning || !Number.isFinite(next)) return;
+  fitMode = fitting;
+  const viewport = $('viewport'), board = $('artboard');
+  const viewRect = viewport.getBoundingClientRect(), oldRect = board.getBoundingClientRect();
+  const focus = anchor || { x: viewport.clientWidth / 2, y: viewport.clientHeight / 2 };
+  const imagePoint = { x: (viewRect.left + focus.x - oldRect.left) / scale, y: (viewRect.top + focus.y - oldRect.top) / scale };
+  scale = Math.max(.1, Math.min(8, next));
+  // Magnify source pixels with CSS above 100%, keeping backing canvases bounded at document resolution.
+  const renderScale = Math.min(scale, 1), displayScale = scale / renderScale;
+  stage.size({ width: width * renderScale, height: height * renderScale });
+  stage.scale({ x: renderScale, y: renderScale });
+  Object.assign(stage.container().style, { width: `${width * renderScale}px`, height: `${height * renderScale}px`, transform: `scale(${displayScale})`, transformOrigin: 'top left' });
+  board.style.width = `${width * scale}px`; board.style.height = `${height * scale}px`;
+  board.classList.toggle('magnified', scale > 1);
+  transformer.setAttrs({ anchorSize: 8 / displayScale, borderStrokeWidth: 1 / displayScale, anchorStrokeWidth: 1 / displayScale, rotateAnchorOffset: 24 / displayScale });
+  transformer.find('._anchor').forEach(anchor => anchor.hitStrokeWidth(Math.max(2, 16 / displayScale)));
+  boxOutline.setAttrs({ strokeWidth: 1 / scale, dash: [6 / scale, 4 / scale] });
+  $('zoom-value').value = Math.round(scale * 100);
+  $('zoom-in').disabled = scale >= 8; $('zoom-out').disabled = scale <= .1;
+  if (fitting) { viewport.scrollLeft = 0; viewport.scrollTop = 0; }
+  else {
+    const newRect = board.getBoundingClientRect();
+    viewport.scrollLeft += newRect.left - viewRect.left + imagePoint.x * scale - focus.x;
+    viewport.scrollTop += newRect.top - viewRect.top + imagePoint.y * scale - focus.y;
+  }
+  stage.draw();
+}
+function fit() {
+  const viewport = $('viewport'), style = getComputedStyle(viewport);
+  const availableWidth = viewport.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  const availableHeight = viewport.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+  zoom(Math.min(availableWidth / width, availableHeight / height, 1), null, true);
+}
 function clearMask() { mask.getContext('2d').clearRect(0, 0, width, height); boxOutline.hide(); hasMask = false; $('selection-state').textContent = 'None'; overlay.batchDraw(); }
-function setTool(next) { finishStroke(); tool = next; document.querySelectorAll('[data-tool]').forEach(b => { b.classList.toggle('active', b.dataset.tool === tool); b.setAttribute('aria-pressed', String(b.dataset.tool === tool)); }); layers.forEach(l => l.node.draggable(tool === 'move')); stage.container().style.cursor = tool === 'move' ? 'default' : 'crosshair'; select(selected); }
+function setTool(next) { finishStroke(); tool = next; document.querySelectorAll('[data-tool]').forEach(b => { b.classList.toggle('active', b.dataset.tool === tool); b.setAttribute('aria-pressed', String(b.dataset.tool === tool)); }); layers.forEach(l => l.node.draggable(tool === 'move')); updateCursor(); select(selected); }
+function updateCursor() { const cursor = panning ? 'grabbing' : tool === 'pan' || spacePan ? 'grab' : tool === 'move' ? 'default' : 'crosshair'; stage.container().style.cursor = cursor; $('viewport').style.cursor = tool === 'pan' || spacePan || panning ? cursor : 'default'; }
 function point(event) { const rect = stage.content.getBoundingClientRect(); return { x: (event.clientX - rect.left) * width / rect.width, y: (event.clientY - rect.top) * height / rect.height }; }
 function stroke(from, to) {
   const { target, mode, color, size } = drawing, ctx = target.getContext('2d'); ctx.save(); ctx.globalCompositeOperation = mode === 'erase' ? 'destination-out' : 'source-over'; ctx.strokeStyle = mode === 'select' ? '#ff749c' : color; ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = size; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke(); ctx.beginPath(); ctx.arc(to.x, to.y, ctx.lineWidth / 2, 0, Math.PI * 2); ctx.fill(); ctx.restore();
@@ -106,7 +145,7 @@ function drawBox(to) {
 // Capture and listen on the same DOM surface; capturing the parent bypasses Konva's movement listeners.
 const drawingSurface = stage.content;
 drawingSurface.addEventListener('pointerdown', event => {
-  if (busy || playing || drawing || tool === 'move' || event.button !== 0 || event.isPrimary === false) return;
+  if (busy || playing || drawing || panning || spacePan || ['move', 'pan'].includes(tool) || event.button !== 0 || event.isPrimary === false) return;
   event.preventDefault(); const p = point(event), selecting = tool === 'select' || tool === 'box';
   if (!selecting) { if (!active()?.node.visible()) return status('Select a visible layer first.'); remember(); replaceBuffer(active(), rasterize(active())); }
   const base = tool === 'box' && event.shiftKey ? canvas() : null;
@@ -134,7 +173,39 @@ drawingSurface.addEventListener('pointermove', continueStroke);
 drawingSurface.addEventListener('pointerup', finishStroke);
 drawingSurface.addEventListener('pointercancel', finishStroke);
 drawingSurface.addEventListener('lostpointercapture', finishStroke);
-window.addEventListener('blur', () => finishStroke());
+const viewport = $('viewport');
+viewport.addEventListener('pointerdown', event => {
+  if (busy || playing || drawing || panning || event.isPrimary === false || !(event.button === 1 || event.button === 0 && (tool === 'pan' || spacePan))) return;
+  event.preventDefault(); event.stopImmediatePropagation();
+  panning = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, left: viewport.scrollLeft, top: viewport.scrollTop };
+  viewport.setPointerCapture(event.pointerId); updateCursor();
+}, true);
+viewport.addEventListener('pointermove', event => {
+  if (!panning || event.pointerId !== panning.pointerId) return;
+  event.preventDefault(); event.stopImmediatePropagation();
+  viewport.scrollLeft = panning.left + panning.x - event.clientX;
+  viewport.scrollTop = panning.top + panning.y - event.clientY;
+}, true);
+function finishPan(event) {
+  if (!panning || event?.pointerId !== undefined && event.pointerId !== panning.pointerId) return;
+  const { pointerId } = panning; panning = null;
+  if (viewport.hasPointerCapture(pointerId)) viewport.releasePointerCapture(pointerId);
+  updateCursor();
+}
+for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) viewport.addEventListener(type, finishPan);
+viewport.addEventListener('auxclick', event => { if (event.button === 1) event.preventDefault(); });
+viewport.addEventListener('wheel', event => {
+  if (!event.ctrlKey && !event.metaKey) return;
+  event.preventDefault(); if (busy || playing || drawing || panning) return;
+  const rect = viewport.getBoundingClientRect(), unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1;
+  zoom(scale * Math.exp(-Math.max(-500, Math.min(500, event.deltaY * unit)) * .002), { x: event.clientX - rect.left, y: event.clientY - rect.top });
+}, { passive: false });
+window.addEventListener('keydown', event => {
+  if (event.code !== 'Space' || /INPUT|TEXTAREA|SELECT/.test(event.target.tagName) || event.target.tagName === 'BUTTON' && !viewport.matches(':hover') || document.querySelector('dialog[open]')) return;
+  event.preventDefault(); spacePan = true; updateCursor();
+});
+window.addEventListener('keyup', event => { if (event.code === 'Space') { spacePan = false; updateCursor(); } });
+window.addEventListener('blur', () => { finishStroke(); finishPan(); spacePan = false; updateCursor(); });
 function requireSelection() { if (!active()?.node.visible()) throw new Error('Select a visible layer first.'); if (!hasMask) throw new Error('Select the part to edit with the painted or box selection tool first.'); }
 function applyMask(source, operation = 'destination-in') { const ctx = source.getContext('2d'); ctx.save(); ctx.globalCompositeOperation = operation; ctx.drawImage(mask, 0, 0); ctx.restore(); return source; }
 function cropContent(buffer) { const ctx = buffer.getContext('2d'), data = ctx.getImageData(0, 0, width, height).data; let x0 = width, y0 = height, x1 = -1, y1 = -1; for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) if (data[(y * width + x) * 4 + 3]) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); } if (x1 < 0) throw new Error('The selection contains no pixels on this layer.'); const result = canvas(x1 - x0 + 1, y1 - y0 + 1); result.getContext('2d').drawImage(buffer, x0, y0, result.width, result.height, 0, 0, result.width, result.height); return { buffer: result, x: x0, y: y0 }; }
@@ -196,6 +267,8 @@ $('brush-size').oninput=()=>{$('brush-value').textContent=$('brush-size').value;
 handle('undo',async()=>{if(!history.length)return;const current=project(),previous=history.pop();setBusy(true);try{future.push(current);await restore(previous);}finally{setBusy(false);}status('Undone');});
 handle('redo',async()=>{if(!future.length)return;const current=project(),next=future.pop();setBusy(true);try{history.push(current);await restore(next);}finally{setBusy(false);}status('Redone');});
 handle('zoom-in',()=>zoom(scale*1.2));handle('zoom-out',()=>zoom(scale/1.2));handle('fit',fit);
+$('zoom-value').onchange = () => { if (!busy && !playing) zoom(Number($('zoom-value').value) / 100); };
+$('zoom-value').onkeydown = event => { if (event.key === 'Enter') $('zoom-value').blur(); };
 handle('import-image',()=>$('image-file').click());handle('empty-import',()=>$('image-file').click());
 $('image-file').onchange=()=>guarded(async()=>{const file=$('image-file').files[0];if(!file)return;if(file.size>20*1024*1024)throw new Error('Images must be smaller than 20 MB.');const url=URL.createObjectURL(file);try{await importImage(url,file.name.replace(/\.[^.]+$/,''));}finally{URL.revokeObjectURL(url);$('image-file').value='';}});
 handle('sample',()=>importImage('/assets/sample-car.png','Sample car'));
@@ -240,6 +313,6 @@ function stopPlayback(){clearInterval(playTimer);playing=false;playbackNode.hide
 handle('export',()=>$('export-dialog').showModal());
 $('download-export').onclick=()=>guarded(async()=>{const factor=Number($('export-scale').value),w=Math.round(width*factor),h=Math.round(height*factor);if($('export-type').value==='png'){const output=canvas(w,h);output.getContext('2d').drawImage(composite(),0,0,w,h);download(output.toDataURL(),`${filename()}.png`);}else{syncFrame();const columns=Math.min(8,Math.ceil(Math.sqrt(frames.length))),rows=Math.ceil(frames.length/columns);const output=canvas(w*columns,h*rows),ctx=output.getContext('2d'),metadata={format:'artmaker-spritesheet',image:`${filename()}-sheet.png`,frameWidth:w,frameHeight:h,columns,rows,fps:Number($('fps').value),frames:[]};for(let i=0;i<frames.length;i++){const x=(i%columns)*w,y=Math.floor(i/columns)*h;ctx.drawImage(await renderStored(frames[i]),x,y,w,h);metadata.frames.push({index:i,x,y,width:w,height:h,durationMs:1000/metadata.fps});}download(output.toDataURL(),metadata.image);downloadJSON(metadata,`${filename()}-sheet.json`);}status('Export downloaded.');});
 window.addEventListener('keydown',e=>{if(/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)||document.querySelector('dialog[open]'))return;if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();$(e.shiftKey?'redo':'undo').click();}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();$('save-project').click();}if(e.key==='Escape'){if(playing)stopPlayback();else clearMask();}});
-new ResizeObserver(()=>{if(!drawing)fit();}).observe($('viewport'));
+new ResizeObserver(()=>{if(fitMode&&!drawing&&!panning)fit();}).observe($('viewport'));
 icons();fit();renderLayers();await renderFrames();updateUndo();
 try{const info=await fetch('/api/status').then(r=>r.json());configured.openai=Boolean(info.providers?.openai?.configured ?? info.configured);configured.google=Boolean(info.providers?.google?.configured);if(configured.google&&!configured.openai)provider='google';updateConnection();}catch{status('Local server unavailable.');}

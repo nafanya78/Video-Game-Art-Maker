@@ -30,6 +30,91 @@ async function dragOnBoard(page, from, to) {
   await page.mouse.move(box.x+box.width*to[0],box.y+box.height*to[1],{steps:12});
   await page.mouse.up();
 }
+test('zoom buttons keep the requested magnification instead of snapping back to fit',async({page})=>{
+  await page.goto('/');await page.getByRole('button',{name:'Open sample car'}).click();
+  const initial=(await page.locator('#artboard').boundingBox()).width;
+  for(let i=1;i<=5;i++){
+    await page.getByRole('button',{name:'Zoom in',exact:true}).click();
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    const actual=(await page.locator('#artboard').boundingBox()).width;
+    expect(Math.abs(actual-initial*1.2**i)).toBeLessThan(2);
+  }
+  await page.getByRole('button',{name:'Zoom out',exact:true}).click();
+  expect(Math.abs((await page.locator('#artboard').boundingBox()).width-initial*1.2**4)).toBeLessThan(2);
+});
+async function setZoom(page, percent) {
+  await page.getByRole('spinbutton',{name:'Zoom percentage'}).fill(String(percent));
+  await page.getByRole('spinbutton',{name:'Zoom percentage'}).press('Enter');
+  await expect(page.locator('#zoom-value')).toHaveValue(String(percent));
+}
+test('400% zoom keeps selections pixel-accurate and survives undo and workspace resizing',async({page})=>{
+  await page.goto('/');await solidLayer(page);await setZoom(page,400);
+  await page.getByRole('button',{name:'Box select',exact:true}).click();
+  await dragOnBoard(page,[500/1024,500/1024],[516/1024,516/1024]);
+  await page.getByRole('button',{name:'Remove part',exact:true}).click();
+  const result=await save(page);
+  expect(result.width).toBe(1024);
+  expect((await imagePixels(page,result.frames[0][0].data,[[505,505],[498,505],[520,505]])).map(p=>p[3])).toEqual([0,255,255]);
+  await page.getByRole('button',{name:'Undo',exact:true}).click();await expect(page.locator('#status')).toHaveText('Undone');
+  await expect(page.locator('#zoom-value')).toHaveValue('400');
+  await page.setViewportSize({width:1280,height:900});
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  await expect(page.locator('#zoom-value')).toHaveValue('400');
+  await setZoom(page,800);
+  expect((await page.locator('#artboard').boundingBox()).width).toBe(8192);
+  expect(await page.evaluate(()=>Konva.stages[0].width())).toBe(1024);
+  await expect(page.getByRole('button',{name:'Zoom in',exact:true})).toBeDisabled();
+  await page.getByRole('button',{name:'Fit canvas',exact:true}).click();
+  expect(Number(await page.locator('#zoom-value').inputValue())).toBeLessThan(100);
+});
+test('Ctrl-wheel zoom keeps the image point under the cursor and Fit restores the full canvas',async({page})=>{
+  await page.goto('/');await page.getByRole('button',{name:'Open sample car'}).click();
+  const view=await page.locator('#viewport').boundingBox(),cursor={x:view.x+view.width*.43,y:view.y+view.height*.47};
+  const before=await page.locator('#artboard').boundingBox(),point={x:(cursor.x-before.x)*1024/before.width,y:(cursor.y-before.y)*1024/before.height};
+  const initial=Number(await page.locator('#zoom-value').inputValue());
+  await page.mouse.move(cursor.x,cursor.y);await page.keyboard.down('Control');await page.mouse.wheel(0,-350);await page.keyboard.up('Control');
+  await expect.poll(async()=>Number(await page.locator('#zoom-value').inputValue())).toBeGreaterThan(initial);
+  const after=await page.locator('#artboard').boundingBox();
+  expect(Math.abs((cursor.x-after.x)*1024/after.width-point.x)).toBeLessThan(1);
+  expect(Math.abs((cursor.y-after.y)*1024/after.height-point.y)).toBeLessThan(1);
+  await page.getByRole('button',{name:'Fit canvas',exact:true}).click();
+  const fit=await page.locator('#artboard').boundingBox();
+  expect(fit.x).toBeGreaterThanOrEqual(view.x);expect(fit.y).toBeGreaterThanOrEqual(view.y);
+  expect(fit.x+fit.width).toBeLessThanOrEqual(view.x+view.width);expect(fit.y+fit.height).toBeLessThanOrEqual(view.y+view.height);
+});
+test('hand, Space, and middle-button panning move the view without changing artwork',async({page})=>{
+  await page.goto('/');await page.getByRole('button',{name:'Open sample car'}).click();await setZoom(page,200);
+  const original=await save(page),v=await page.locator('#viewport').boundingBox(),start={x:v.x+v.width/2,y:v.y+v.height/2};
+  for(const mode of ['hand','space','middle']){
+    await page.getByRole('button',{name:mode==='hand'?'Pan canvas':'Brush',exact:true}).click();
+    const before=await page.locator('#viewport').evaluate(v=>v.scrollLeft);
+    await page.mouse.move(start.x,start.y);
+    if(mode==='space')await page.keyboard.down('Space');
+    await page.mouse.down({button:mode==='middle'?'middle':'left'});
+    await page.mouse.move(start.x-60,start.y-40,{steps:8});
+    await page.mouse.up({button:mode==='middle'?'middle':'left'});
+    if(mode==='space')await page.keyboard.up('Space');
+    expect(await page.locator('#viewport').evaluate(v=>v.scrollLeft)).toBeCloseTo(before+60,0);
+  }
+  expect((await save(page)).frames).toEqual(original.frames);
+  await page.screenshot({path:'test-results/zoom-detail.png',fullPage:true});
+  await page.locator('#viewport').evaluate(v=>{v.scrollLeft=0;v.scrollTop=0;});
+  const first=await page.locator('#artboard').boundingBox();expect(first.x).toBeGreaterThanOrEqual(v.x);expect(first.y).toBeGreaterThanOrEqual(v.y);
+  await page.locator('#viewport').evaluate(v=>{v.scrollLeft=v.scrollWidth;v.scrollTop=v.scrollHeight;});
+  const last=await page.locator('#artboard').boundingBox();expect(last.x+last.width).toBeLessThanOrEqual(v.x+v.width);expect(last.y+last.height).toBeLessThanOrEqual(v.y+v.height);
+});
+test('400% extracted parts still move and resize at the correct image coordinates',async({page})=>{
+  await page.goto('/');await solidLayer(page);
+  await page.getByRole('button',{name:'Box select',exact:true}).click();await dragOnBoard(page,[.45,.45],[.55,.55]);
+  await page.getByRole('button',{name:'Extract',exact:true}).click();const before=await save(page);
+  await setZoom(page,400);await dragOnBoard(page,[.5,.5],[.51,.5]);
+  const moved=await save(page);expect(Math.abs(moved.frames[0][1].x-before.frames[0][1].x-10.24)).toBeLessThan(1);
+  const anchor=await page.evaluate(()=>{const stage=Konva.stages[0],p=stage.findOne('Transformer').findOne('.bottom-right').getAbsolutePosition(),r=stage.content.getBoundingClientRect();return{x:r.left+p.x*r.width/stage.width(),y:r.top+p.y*r.height/stage.height()};});
+  await page.screenshot({path:'test-results/zoom-transform-before.png',fullPage:true});
+  await page.mouse.move(anchor.x,anchor.y);await page.mouse.down();
+  await page.mouse.move(anchor.x+30,anchor.y+30,{steps:8});await page.mouse.up();
+  expect((await save(page)).frames[0][1].scaleX).toBeGreaterThan(1.05);
+});
 test('brush and eraser drag continuously and undo each complete stroke', async ({page}) => {
   await page.goto('/');await page.getByRole('button',{name:'Add paint layer',exact:true}).click();
   await page.getByRole('button',{name:'Brush',exact:true}).click();
